@@ -1,7 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from instances import generate_basic_instance
+from instances import generate_distribution, sample_instance
 from offline import offline_opt, recover_path, BUY, SELL
+from lp import solve_lp_iid
 
 
 def plot_instance(b, s, actions, inventory, B, title=None):
@@ -40,11 +41,11 @@ def plot_instance(b, s, actions, inventory, B, title=None):
 
 
 if __name__ == "__main__":
-    T, B, B_0 = 30, 1, 1
+    T, K, B, B_0 = 30, 10, 1, 1
 
-    instance = generate_basic_instance(T=T)
-    b = np.array([b for b, s in instance])
-    s = np.array([s for b, s in instance])
+    b_k, s_k, p_k = generate_distribution(K)
+    b, s, _ = sample_instance(b_k, s_k, p_k, T)
+    lp = solve_lp_iid(b_k, s_k, p_k, T, B, B_0)
 
     opt, V, policy = offline_opt(b, s, B, B_0)
     actions, inventory = recover_path(policy, B_0)
@@ -54,6 +55,6 @@ if __name__ == "__main__":
     assert np.isclose(profit, opt), (profit, opt)
 
     fig = plot_instance(b, s, actions, inventory, B,
-                        title=f"Profeta offline  (T={T}, B={B}, B0={B_0}, OPT={opt:.2f})")
+                        title=f"Profeta offline  (T={T}, K={K}, B={B}, B0={B_0}, OPT={opt:.2f}, LP_IID={lp.value:.2f})")
     fig.savefig("offline_path.png", dpi=150)
     plt.show()
