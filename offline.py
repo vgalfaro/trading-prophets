@@ -23,6 +23,19 @@ def offline_opt(b, s, B, B_0):
             policy[t, x] = act
     return V[0, B_0], V, policy
 
+def offline_opt_batch(b, s, B, B_0):
+    """Misma DP que offline_opt, vectorizada sobre N instancias: b, s de forma (N, T).
+    Devuelve OPT de cada instancia, forma (N,)."""
+    b, s = np.asarray(b, dtype=float), np.asarray(s, dtype=float)
+    N, T = b.shape
+    V = np.zeros((N, B + 1))
+    for t in range(T - 1, -1, -1):
+        new = V.copy()                                                      # skip
+        new[:, :-1] = np.maximum(new[:, :-1], V[:, 1:] - b[:, t, None])     # buy
+        new[:, 1:] = np.maximum(new[:, 1:], V[:, :-1] + s[:, t, None])      # sell
+        V = new
+    return V[:, B_0]
+
 def recover_path(policy, B_0):
     """Recorre la política hacia adelante desde x = B_0 y devuelve
     las acciones tomadas y el inventario (inventory[t] = inventario tras t requests)."""

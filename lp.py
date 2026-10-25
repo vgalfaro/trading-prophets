@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import numpy as np
+import scipy.sparse as sp
 import gurobipy as gp
 from gurobipy import GRB
 
@@ -59,6 +60,77 @@ def solve_lp_iid(b, s, p, T, B, B_0):
     sol = LPIIDSolution(value=model.ObjVal, y=y_val, z=z_val,
                         alpha_S=alpha_S, alpha_B=alpha_B, Gamma=T * alpha_S,
                         final_inventory=B_0 + T * (alpha_B - alpha_S))
+    model.dispose()
+    return sol
+
+
+@dataclass
+class LPRelaxSolution:
+    value: float            # LP(x*), cota superior de E[OPT offline] (Lema 2.1)
+    qb: np.ndarray          # (T+1, K) q^b_{i,k}: prob. de comprar en la request i con tipo k
+    qs: np.ndarray          # (T+1, K) q^s_{j,k}: prob. de vender en la request j con tipo k
+    bf: np.ndarray          # (T+1, K) precios de compra, fila 0 = request ficticia D_0
+    sf: np.ndarray          # (T+1, K) precios de venta
+    pf: np.ndarray          # (T+1, K) probabilidades
+    trades: tuple           # (i, j, k, k', x) con x_{i,j,k,k'} > 0
+
+
+def lp_value(qb, qs, bf, sf):
+    """Objetivo (4): sum_i q^s_i s_i - sum_i q^b_i b_i (los b = inf con q^b = 0 no cuentan)."""
+    return float((qs * sf).sum() - np.where(qb > 0, qb * np.where(np.isfinite(bf), bf, 0.0), 0.0).sum())
+
+
+def solve_lp_relax(b, s, p, B_0=1):
+    """Resuelve LP Relax (Sección 2) con K tipos por request (Sección C), para B = 1.
+
+    b, s, p son (T, K): la fila t-1 describe la request t. Se agrega la request ficticia 0,
+    D_0 = (0, 0) w.p. B_0, que representa la copia inicial. Variables x_{i,j,k,k'} >= 0 para
+    0 <= i < j <= T: comprar en i (tipo k) y vender esa copia en j (tipo k')."""
+    b, s, p = (np.asarray(v, dtype=float) for v in (b, s, p))
+    T, K = p.shape
+    bf = np.vstack([np.r_[0.0, np.full(K - 1, np.inf)], b])
+    sf = np.vstack([np.zeros(K), s])
+    pf = np.vstack([np.r_[float(B_0), np.zeros(K - 1)], p])
+    can_buy = (pf > 0) & np.isfinite(bf)
+    can_sell = pf > 0
+    can_sell[0] = False
+
+    # Una variable por (i < j, k, k') con compra en (i, k) y venta en (j, k') posibles
+    I, J = np.triu_indices(T + 1, 1)
+    pair, KB, KS = np.nonzero(can_buy[I][:, :, None] & can_sell[J][:, None, :])
+    I, J = I[pair], J[pair]
+    n = len(I)
+    cols = np.arange(n)
+    ones = np.ones(n)
+
+    # Qb @ x = q^b_{i,k} y Qs @ x = q^s_{j,k} (filas i*K + k)
+    Qb = sp.csr_matrix((ones, (I * K + KB, cols)), shape=((T + 1) * K, n))
+    Qs = sp.csr_matrix((ones, (J * K + KS, cols)), shape=((T + 1) * K, n))
+    # Agregados por tiempo: (Ab - As) @ x = q^b_i - q^s_i
+    E = sp.csr_matrix((ones, (I, cols)), shape=(T + 1, n)) - sp.csr_matrix((ones, (J, cols)), shape=(T + 1, n))
+
+    model = gp.Model('lp_relax', env=_get_env())
+    x = model.addMVar(n, lb=0.0, name='x')
+    model.setObjective((sf[J, KS] - bf[I, KB]) @ x, GRB.MAXIMIZE)
+
+    model.addConstr((Qb + Qs) @ x <= pf.ravel(), name='prob')  # (1)
+
+    # (2): sum_{i<t} sum_{j>=t} x_ij = sum_{i<t} q^b_i - sum_{j<t} q^s_j = H_t <= 1. Se
+    # escribe con H_t = H_{t-1} + q^b_{t-1} - q^s_{t-1} para no tener O(T^3) coeficientes.
+    H = model.addMVar(T, lb=-GRB.INFINITY, ub=1.0, name='H')
+    D = sp.eye(T, format='csr') - sp.eye(T, k=-1, format='csr')
+    model.addConstr(D @ H - E[:T] @ x == 0, name='hold')
+
+    model.optimize()
+    if model.Status != GRB.OPTIMAL:
+        raise RuntimeError(f'LP Relax no resuelto a optimalidad (status {model.Status})')
+
+    xv = x.X
+    nz = xv > 1e-12
+    sol = LPRelaxSolution(value=model.ObjVal,
+                          qb=(Qb @ xv).reshape(T + 1, K), qs=(Qs @ xv).reshape(T + 1, K),
+                          bf=bf, sf=sf, pf=pf,
+                          trades=(I[nz], J[nz], KB[nz], KS[nz], xv[nz]))
     model.dispose()
     return sol
 
